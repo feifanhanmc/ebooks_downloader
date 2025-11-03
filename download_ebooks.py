@@ -36,7 +36,7 @@ def run(playwright: Playwright, url, book_name, content_type='book', file_type='
         downloads_path=OUTPUT_PATH,
         # args=['--blink-settings=imagesEnabled=false'] # 默认不加载图片，提升速度
     )
-    context = browser.new_context(accept_downloads=True, timeout=60_000)
+    context = browser.new_context(accept_downloads=True)
     page = context.new_page()
     page.route("**/*", lambda route: route.abort() if route.request.resource_type == "image" else route.continue_())
     page.goto(url)
@@ -50,10 +50,9 @@ def run(playwright: Playwright, url, book_name, content_type='book', file_type='
     page.get_by_role("textbox", name="Password").fill(ZLIBRARY_PASSWORD)
     page.get_by_role("button", name="Log In").click()
     # 确保登录成功
-    expect(page.get_by_role("button", name=" 导入数据")).to_be_visible()
-
-
+    expect(page.locator(".navigation-element.navigation-user-card-element > .navigation-icon")).to_be_visible()
     print("登录成功，开始搜索电子书...")
+
     book_info = pd.DataFrame()
     page_search = context.new_page()
     search_url = f'{url}/s/{book_name}?selected_content_types[]={content_type}'
