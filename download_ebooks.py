@@ -58,12 +58,12 @@ def run(playwright: Playwright, url, book_name, content_type='book', file_type='
     datetime_now = datetime.now().astimezone(pytz.timezone('Asia/Shanghai')).strftime('%Y-%m-%d%H%M%S')
 
     print("正在登录ZLibrary...")
-    page.get_by_role("link", name="登录").click()
+    page.get_by_role("link", name="Log In").click()
     page.get_by_role("textbox", name="Email").click()
     page.get_by_role("textbox", name="Email").fill(ZLIBRARY_USERNAME)
-    page.get_by_role("textbox", name="密码").click()
-    page.get_by_role("textbox", name="密码").fill(ZLIBRARY_PASSWORD)
-    page.get_by_role("button", name="登录").click()
+    page.get_by_role("textbox", name="Password").click()
+    page.get_by_role("textbox", name="Password").fill(ZLIBRARY_PASSWORD)
+    page.get_by_role("button", name="Log In").click()
 
 
     print("登录成功，开始搜索电子书...")
