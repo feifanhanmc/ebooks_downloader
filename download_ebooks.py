@@ -19,23 +19,6 @@ from urllib.parse import quote
 BASE_PATH, OUTPUT_PATH, ZLIBRARY_USERNAME, ZLIBRARY_PASSWORD, HEADERS, COOKIES = None, None, None, None, {}, {}
 
 
-def update_cookies(context):
-    cookies = context.cookies()
-
-    print(cookies)
-    global HEADERS, COOKIES
-    COOKIES = {}
-    for item in cookies:
-        COOKIES[item['name']] = item['value']
-    HEADERS['Cookie'] = "; ".join([f"{k}={v}" for k, v in cookies.items() if k in ['CPL-coros-region', 'CPL-coros-token', 'tfstk']])
-    
-    # 保存cookies和headers到文件
-    with open(os.path.join(OUTPUT_PATH, 'cookies.json'), 'w', encoding='utf-8') as f:
-        json.dump(COOKIES, f, ensure_ascii=False, indent=2)
-    with open(os.path.join(OUTPUT_PATH, 'headers.json'), 'w', encoding='utf-8') as f:
-        json.dump(HEADERS, f, ensure_ascii=False, indent=2)
-
-
 def run(playwright: Playwright, url, book_name, content_type='book', file_type='epub', auto_download_num=3, headless=False):
     """
     使用 Playwright 自动化登录 ZLibrary 并下载电子书
@@ -50,10 +33,12 @@ def run(playwright: Playwright, url, book_name, content_type='book', file_type='
     
     browser = playwright.chromium.launch(
         headless=headless,
+        downloads_path=OUTPUT_PATH,
         # args=['--blink-settings=imagesEnabled=false'] # 默认不加载图片，提升速度
     )
-    context = browser.new_context()
+    context = browser.new_context(accept_downloads=True, timeout=60_000)
     page = context.new_page()
+    page.route("**/*", lambda route: route.abort() if route.request.resource_type == "image" else route.continue_())
     page.goto(url)
     datetime_now = datetime.now().astimezone(pytz.timezone('Asia/Shanghai')).strftime('%Y-%m-%d%H%M%S')
 
@@ -64,12 +49,16 @@ def run(playwright: Playwright, url, book_name, content_type='book', file_type='
     page.get_by_role("textbox", name="Password").click()
     page.get_by_role("textbox", name="Password").fill(ZLIBRARY_PASSWORD)
     page.get_by_role("button", name="Log In").click()
+    # 确保登录成功
+    expect(page.get_by_role("button", name=" 导入数据")).to_be_visible()
 
 
     print("登录成功，开始搜索电子书...")
     book_info = pd.DataFrame()
-    # resp = page.goto(f'{url}/s/{book_name}?selected_content_types[]={content_type}') #, wait_until="commit")
-    resp = page.goto(quote(f'{url}/s/{book_name}', safe=":/?#[]@!$&'()*+,;="))
+    page_search = context.new_page()
+    search_url = f'{url}/s/{book_name}?selected_content_types[]={content_type}'
+    print("搜索链接: ", search_url)
+    resp = page_search.goto(search_url)
     if resp.status != 200:
         print(f"请求错误，状态码: {resp.status}")
     else:
@@ -84,26 +73,51 @@ def run(playwright: Playwright, url, book_name, content_type='book', file_type='
             records.append(attrs)
         book_info = pd.DataFrame(records)
 
-        # 截图保存搜索结果页面
-        page.evaluate("window.scrollTo(0, 500)")
-        page.wait_for_timeout(500)
-        page.screenshot(path=os.path.join(OUTPUT_PATH, f'{book_name}_screenshot_{datetime_now}.png'), full_page=False)
+        # 截图保存搜索结果页面，循环向下滚动页面，以加载完全
+        for _ in range(10):
+            time.sleep(3)
+            page_search.keyboard.press("PageDown")
+            page_search.wait_for_load_state("networkidle")
+        page_search.screenshot(path=os.path.join(OUTPUT_PATH, f'{book_name}_screenshot_{datetime_now}.png'), full_page=True)
 
     if book_info.empty:
         print("未找到相关电子书: ", book_name)
     else:
         print(f"找到相关电子书 {len(book_info)} 本")
+        book_info.to_csv(os.path.join(OUTPUT_PATH, f'{book_name}_search_results_{datetime_now}.csv'), index=False, encoding='utf-8-sig')
 
-    print("开始下载电子书...")
+    print("打开书籍详情页面，解析下载链接...")
+    page_detail = context.new_page()
     for idx, row in book_info.head(auto_download_num).iterrows():
-        print(f"正在下载第 {idx+1} 本: ", row['title'])
-        id, title, author, extension, download = row['id'], row['title'], row['author'], row['extension'], row['download']
-        page.goto(f"{url}{download}")
-        with page.expect_download() as download_info:
-            download = download_info.value
-            output_filename = os.path.join(OUTPUT_PATH, f'{book_name}_{id}_{title}_{author}_{datetime_now}.{extension}')
-            download.save_as(path=output_filename)
-            print("文件已保存至: ", output_filename)
+        id, title, author, extension, detail = row['id'], row['title'], row['author'], row['extension'], row['href']
+        detail_url = f"{url}{detail}"
+        
+        print(f"正在解析第 {idx+1} 本: ", title, author, extension, detail_url)
+        page_detail.route("**/*", lambda route: route.abort() if route.request.resource_type == "image" else route.continue_())
+        page_detail.goto(detail_url)
+        resp = page_detail.goto(detail_url)
+        if resp.status != 200:
+            print(f"请求错误，状态码: {resp.status}")
+        else:
+            # 解析书籍详情页面
+            soup = BeautifulSoup(resp.text(), "lxml")
+            download_link_tag = soup.select_one('a.btn.btn-default.addDownloadedBook')
+            if not download_link_tag:
+                print("没有解析到指定的下载链接。")
+            else:
+                href_value = download_link_tag.get('href')
+                download_url = f"{url}{href_value}"
+                print(f"成功解析出下载链接: {download_url}")
+                page_download = context.new_page()
+
+                print("开始下载文件...")
+                page_download.on("download", lambda download: print("捕获下载:", download.url))
+                with page_download.expect_download() as download_info:
+                    page_download.goto(download_url)  # 或直接 click 触发下载的元素
+                    download = download_info.value
+                    output_filename = os.path.join(OUTPUT_PATH, f'{book_name}_{id}_{title}_{author}_{datetime_now}.{extension}')
+                    download.save_as(path=output_filename)
+                    print("文件已保存至: ", output_filename)
 
     page.close()
 
@@ -129,13 +143,12 @@ def download_ebook(ebook_name):
             config = json.load(f)
         ZLIBRARY_USERNAME = config.get('ZLIBRARY_USERNAME')
         ZLIBRARY_PASSWORD = config.get('ZLIBRARY_PASSWORD')
+    else:
+        raise ValueError("请在 config.json 文件中配置 ZLIBRARY_USERNAME 和 ZLIBRARY_PASSWORD")
 
     zlibrary_url = get_zlibrary_website()
     with sync_playwright() as playwright:
-        run(playwright, zlibrary_url, ebook_name, headless=True)
-
-
-
+        run(playwright, zlibrary_url, ebook_name, headless=False)
 
 
 if __name__ == "__main__":
